@@ -15,7 +15,7 @@ import machine
 
 DEFAULTS = {
     "device_name":    "",
-    "sport":          "baseball",
+    "sport":          "basketball",
     "console":        "daktronics",
     "uart_rx":        16,
     "uart_tx":        17,
