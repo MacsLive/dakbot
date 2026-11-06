@@ -405,7 +405,7 @@ def _settings_html(saved=False):
         '<script>'
         '(function(){'
         'var cur=' + str(_version.VERSION) + ';'
-        'fetch("https://api.github.com/repos/chrissabato/dakbot/contents/version.py",'
+        'fetch("https://api.github.com/repos/MacsLive/dakbot/contents/version.py",'
         '{cache:"no-store",headers:{"Accept":"application/vnd.github.raw"}})'
         '.then(function(r){return r.text();})'
         '.then(function(t){'
