@@ -17,7 +17,7 @@ import ssl
 import utime
 
 _HOST  = 'raw.githubusercontent.com'
-_BASE  = '/chrissabato/dakbot/main/'
+_BASE  = '/MacsLive/dakbot/main/'
 _FILES = [
     'config.py',
     'settings.py',
