@@ -86,7 +86,7 @@ fi
 
 # 5. Verify W5500 support
 echo "==> Verifying W5500 (Ethernet) support..."
-W5500_OK=$(mpremote_retry exec "import network; print(hasattr(network, 'PHY_W5500'))")
+W5500_OK=$(mpremote_retry exec "import network; print(hasattr(network, 'PHY_W5500'))" | tr -d '\r')
 if [ "$W5500_OK" != "True" ]; then
     echo "ERROR: this firmware build does not support PHY_W5500."
     echo "Try the ESP32_GENERIC_S3-SPIRAM variant from https://micropython.org/download/ESP32_GENERIC_S3/"
