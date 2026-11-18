@@ -16,6 +16,7 @@ import machine
 DEFAULTS = {
     "device_name":    "",
     "sport":          "basketball",
+    "basketball_level": "college",    # "college" (2 halves) or "highschool" (4 quarters)
     "console":        "daktronics",
     "uart_rx":        16,
     "uart_tx":        17,
@@ -34,8 +35,7 @@ DEFAULTS = {
     "vmix_enabled":   False,
     "vmix_host":      "",
     "vmix_port":      8099,
-    "vmix_input":     "",
-    "vmix_field":     "Clock.Text",
+    "vmix_fields":    "",         # "[Title]" + "DakbotKey = vMixField" lines
 }
 
 _FILE = "settings.json"
@@ -65,10 +65,26 @@ def load():
             saved = ujson.load(f)
         current = dict(DEFAULTS)
         current.update(saved)
+        _migrate_vmix(saved)
         print("Settings loaded from", _FILE)
     except:
         current = dict(DEFAULTS)
         print("No settings.json found — using defaults")
+
+
+def _migrate_vmix(saved):
+    """Older firmware had one title input ('vmix_input') and a clock field
+    ('vmix_field') instead of the [Title]-based 'vmix_fields' list. Carry
+    such a setup over as the equivalent lines, so an OTA update doesn't
+    silently stop pushing the clock. Takes effect in memory; it's written
+    to flash the next time settings are saved."""
+    if 'vmix_fields' in saved:
+        return
+    inp   = saved.get('vmix_input', '').strip()
+    field = saved.get('vmix_field', 'Clock.Text').strip()
+    if inp and field:
+        clock = 'Clock' if saved.get('console') == 'colorado' else 'MainClockTime'
+        current['vmix_fields'] = '[{}]\n{} = {}'.format(inp, clock, field)
 
 
 def save(data):

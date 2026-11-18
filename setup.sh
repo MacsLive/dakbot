@@ -17,7 +17,14 @@ FILES="config.py settings.py daktronics.py colorado.py webserver.py mqtt_publish
 # 1. Install tools
 echo "==> Checking for esptool and mpremote..."
 if ! command -v esptool.py >/dev/null 2>&1 || ! command -v mpremote >/dev/null 2>&1; then
-    pip install esptool mpremote
+    # uv tool installs each into its own isolated env (~/.local/bin), which
+    # works on distros that block system-wide pip (PEP 668, e.g. Arch)
+    if command -v uv >/dev/null 2>&1; then
+        uv tool install esptool
+        uv tool install mpremote
+    else
+        pip install esptool mpremote
+    fi
 else
     echo "    already installed."
 fi

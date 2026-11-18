@@ -27,6 +27,10 @@ class Daktronics:
         self.sport = sport_config
         self.dak_string = ' ' * self.sport['dakSize'][1]
 
+        # 1 for every buffer position the console has actually sent since
+        # boot — lets main.py show defaults for fields never received
+        self.received = bytearray(len(self.dak_string))
+
         self.header   = b''
         self.code     = b''
         self.rtd      = b''
@@ -78,8 +82,19 @@ class Daktronics:
                 + text_str
                 + self.dak_string[pos + len(text_str):]
             )
+            for i in range(pos, min(pos + len(text_str), len(self.received))):
+                self.received[i] = 1
         except (ValueError, UnicodeError):
             pass   # malformed packet — keep previous buffer
+
+    # -------------------------------------------------------------------------
+    def was_received(self, key):
+        """True once any packet has covered part of this field."""
+        if key not in self.sport:
+            return False
+        start  = self.sport[key][0] - 1
+        length = self.sport[key][1]
+        return any(self.received[start:start + length])
 
     # -------------------------------------------------------------------------
     def __getitem__(self, key):

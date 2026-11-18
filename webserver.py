@@ -19,6 +19,7 @@ import version as _version
 
 score_data = {}
 device_ip  = '—'          # set by main.py after Ethernet connects
+nic        = None         # the Ethernet interface, set by main.py — IP is read live
 _boot_ms   = utime.ticks_ms()
 
 
@@ -120,9 +121,10 @@ _CSS = (
     '.card{background:#fff;border-radius:8px;padding:1.25rem;margin-bottom:1rem;box-shadow:0 1px 3px rgba(0,0,0,.1)}'
     'h2{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#888;margin-bottom:1rem}'
     'label{display:block;font-size:.875rem;font-weight:500;margin-bottom:.3rem;color:#333}'
-    'input[type=text],input[type=number],select{width:100%;padding:.5rem .75rem;border:1px solid #ddd;'
+    'input[type=text],input[type=number],select,textarea{width:100%;padding:.5rem .75rem;border:1px solid #ddd;'
     'border-radius:6px;font-size:.9rem;margin-bottom:.9rem;background:#fafafa}'
-    'input[type=text]:focus,input[type=number]:focus,select:focus{outline:none;border-color:#2563eb;background:#fff}'
+    'input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{outline:none;border-color:#2563eb;background:#fff}'
+    'textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.8rem;resize:vertical}'
     '.check-row{display:flex;align-items:center;gap:.6rem;margin-bottom:.9rem}'
     '.check-row input{width:1rem;height:1rem;margin:0}'
     '.check-row label{margin:0;font-weight:400}'
@@ -137,6 +139,18 @@ _CSS = (
 )
 
 _update_error = None   # set by _do_update() on a failed OTA; shown as a banner on /settings
+
+def _current_ip():
+    """The interface's address right now — device_ip is only set if the
+    link was already up at boot, so a DHCP lease that lands later (or a
+    cable plugged in after power-on) would otherwise show as '—'."""
+    try:
+        if nic is not None:
+            return nic.ifconfig()[0] if nic.isconnected() else 'no link / no DHCP lease'
+    except Exception:
+        pass
+    return device_ip
+
 
 def _dashboard_html():
     import gc
@@ -168,23 +182,26 @@ def _dashboard_html():
             + row('Heat',  score_data.get('HeatNumber', '—'))
             + row('Clock', score_data.get('Clock', '—'))
         )
-        # vmix imports this module, so look it up rather than importing it
-        import sys
-        vm = sys.modules.get('vmix')
-        if vm:
-            status_extra += (
-                row('vMix', _html_escape(vm.status))
-                + row('vMix sent', _html_escape(vm.last_sent or '—'))
-                + row('vMix reply', _html_escape(vm.last_reply or '—'))
-            )
     else:
-        status_extra = row('Sport', sport)
+        status_extra = (
+            row('Sport', sport)
+            + row('Clock', _html_escape(score_data.get('MainClockTime') or '—'))
+        )
+    # vmix imports this module, so look it up rather than importing it
+    import sys
+    vm = sys.modules.get('vmix')
+    if vm:
+        status_extra += (
+            row('vMix', _html_escape(vm.status))
+            + row('vMix sent', _html_escape(vm.last_sent or '—'))
+            + row('vMix reply', _html_escape(vm.last_reply or '—'))
+        )
 
     return (
         '<div class="card"><h2>Device Status</h2>'
         '<div style="display:grid;grid-template-columns:auto 1fr;gap:.5rem .75rem;font-size:.875rem">'
         + row('Device Name', dev_name)
-        + row('IP Address', device_ip)
+        + row('IP Address', _current_ip())
         + status_extra
         + row('Version', '<span id="dash-ver">' + str(_version.VERSION) + '</span>')
         + row('MCU Temp',   temp)
@@ -228,16 +245,15 @@ def _mqtt_html(s):
     )
 
 
-def _vmix_html(s, console_val):
+def _vmix_html(s):
     chk     = ' checked' if s.get('vmix_enabled') else ''
     hidden  = '' if s.get('vmix_enabled') else ' style="display:none"'
-    card_hidden = '' if console_val == 'colorado' else ' style="display:none"'
     return (
-        '<div class="card" id="vmixcard"' + card_hidden + '><h2>vMix Clock</h2>'
+        '<div class="card"><h2>vMix Push</h2>'
         '<div class="check-row">'
         '<input type="checkbox" name="vmix_enabled" id="vmix_en"' + chk +
         ' onchange="document.getElementById(\'vmixcfg\').style.display=this.checked?\'\':\'none\';">'
-        '<label for="vmix_en">Push clock to vMix</label>'
+        '<label for="vmix_en">Push to vMix</label>'
         '</div>'
         '<div id="vmixcfg"' + hidden + '>'
         '<label>vMix host</label>'
@@ -245,14 +261,30 @@ def _vmix_html(s, console_val):
         'placeholder="192.168.1.50">'
         '<label>TCP API port</label>'
         '<input type="number" name="vmix_port" value="' + str(s.get('vmix_port', 8099)) + '">'
-        '<label>Title input (name, number, or key)</label>'
-        '<input type="text" name="vmix_input" value="' + s.get('vmix_input', '') + '" '
-        'placeholder="Swim Clock">'
-        '<label>Field name</label>'
-        '<input type="text" name="vmix_field" value="' + s.get('vmix_field', 'Clock.Text') + '" '
-        'placeholder="Clock.Text">'
-        '<p class="note">Sends SetText over vMix\'s TCP API the instant the clock changes, '
-        'instead of waiting for a Data Source poll. Applies within a few seconds of saving — no reboot needed.</p>'
+        '<label for="vmix_fields">Fields — [Title name], then one Dakbot field = vMix field per line</label>'
+        '<textarea name="vmix_fields" id="vmix_fields" rows="14" spellcheck="false" placeholder="'
+        '[Scorebug.gtzip]&#10;'
+        'MainClockTime = Clock.Text&#10;'
+        'HomeTeamScore = HomeScore.Text&#10;'
+        'AwayTeamScore = AwayScore.Text&#10;'
+        'HomeTimeOutsLeft-Total = HomeTO.Text&#10;'
+        'AwayTimeOutsLeft-Total = AwayTO.Text&#10;'
+        'HomeTeamFouls = HomeFouls.Text&#10;'
+        'AwayTeamFouls = AwayFouls.Text&#10;'
+        'GameHalfText = Period.Text&#10;'
+        '&#10;'
+        '[Lower Third Score.gtzip]&#10;'
+        'HomeTeamScore = Home.Text&#10;'
+        'AwayTeamScore = Away.Text">'
+        + _html_escape(s.get('vmix_fields', '')) +
+        '</textarea>'
+        '<p class="note">Sends SetText over vMix\'s TCP API the instant a value changes, '
+        'instead of waiting for a Data Source poll — clock lines first. '
+        '<code>[Title name]</code> is the vMix input\'s name, number, or key; the lines below it '
+        'go to that title. Every field line needs a [Title] above it. Dakbot field names are '
+        'the keys in <code>/data</code> (case-sensitive); a field can be listed under several titles. '
+        'Remove pushed fields from the vMix Data Source mapping, or its slower poll will overwrite them. '
+        'Applies within a few seconds of saving — no reboot needed.</p>'
         '</div>'
         '</div>'
     )
@@ -285,6 +317,15 @@ def _settings_html(saved=False):
         )
         for v, lbl in sports
     )
+    level_val = s.get('basketball_level', 'college')
+    level_opts = ''.join(
+        '<option value="{}"{}>{}</option>'.format(
+            v, ' selected' if level_val == v else '', lbl
+        )
+        for v, lbl in (('college', 'College (2 halves)'),
+                       ('highschool', 'High School (4 quarters)'))
+    )
+    level_hidden = '' if s['sport'] == 'basketball' else ' style="display:none"'
     chk    = ' checked' if s.get('use_dhcp') else ''
     hidden = ' style="display:none"' if s.get('use_dhcp') else ''
     banner = (
@@ -319,9 +360,7 @@ def _settings_html(saved=False):
         '<label for="console_type">Console type</label>'
         '<select name="console" id="console_type" '
         'onchange="document.getElementById(\'sportcard\').style.display='
-        'this.value==\'colorado\'?\'none\':\'\';'
-        'document.getElementById(\'vmixcard\').style.display='
-        'this.value==\'colorado\'?\'\':\'none\';">'
+        'this.value==\'colorado\'?\'none\':\'\';">'
         + console_opts +
         '</select>'
         '</div>'
@@ -329,7 +368,15 @@ def _settings_html(saved=False):
         # ---- Sport -----------------------------------------------------------
         '<div class="card" id="sportcard"' + sport_hidden + '><h2>Sport</h2>'
         '<label for="sport">Active sport</label>'
-        '<select name="sport" id="sport">' + opts + '</select>'
+        '<select name="sport" id="sport" '
+        'onchange="document.getElementById(\'bblevel\').style.display='
+        'this.value==\'basketball\'?\'\':\'none\';">' + opts + '</select>'
+        '<div id="bblevel"' + level_hidden + '>'
+        '<label for="basketball_level">Basketball level</label>'
+        '<select name="basketball_level" id="basketball_level">' + level_opts + '</select>'
+        '<p class="note">Sets GameHalfText: College shows 1st, 2nd, then OT, OT2…; '
+        'High School shows 1st–4th, then OT, OT2…. Applies immediately — no reboot needed.</p>'
+        '</div>'
         '</div>'
 
         # ---- Network ---------------------------------------------------------
@@ -365,8 +412,8 @@ def _settings_html(saved=False):
         # ---- MQTT ------------------------------------------------------------
         + _mqtt_html(s)
 
-        # ---- vMix (Colorado only) --------------------------------------------
-        + _vmix_html(s, console_val) +
+        # ---- vMix ------------------------------------------------------------
+        + _vmix_html(s) +
 
         # ---- Save ------------------------------------------------------------
         '<div class="card"><h2>Save</h2>'
@@ -446,6 +493,9 @@ async def _handle_settings_post(writer, body):
         'device_name':   form.get('device_name', _settings.current.get('device_name', '')),
         'console':       form.get('console', _settings.current.get('console', 'daktronics')),
         'sport':         form.get('sport', _settings.DEFAULTS['sport']),
+        'basketball_level': ('highschool' if form.get('basketball_level',
+                             _settings.current.get('basketball_level')) == 'highschool'
+                             else 'college'),
         'use_dhcp':      'use_dhcp' in form,
         'ip':            form.get('ip',        _settings.current.get('ip', '')),
         'mask':          form.get('mask',      _settings.current.get('mask', '')),
@@ -462,8 +512,7 @@ async def _handle_settings_post(writer, body):
         'vmix_enabled':  'vmix_enabled' in form,
         'vmix_host':     _clean_hostname(form.get('vmix_host', _settings.current.get('vmix_host', ''))),
         'vmix_port':     int(form.get('vmix_port', _settings.current.get('vmix_port', 8099))),
-        'vmix_input':    form.get('vmix_input', _settings.current.get('vmix_input', '')),
-        'vmix_field':    form.get('vmix_field', _settings.current.get('vmix_field', 'Clock.Text')),
+        'vmix_fields':   form.get('vmix_fields', _settings.current.get('vmix_fields', '')).strip(),
     })
     await _redirect(writer, '/settings?saved=1')
 

@@ -98,6 +98,31 @@ def init_ethernet():
 # Score processing
 # =============================================================================
 
+# Shown for a field until the console has sent anything at that position —
+# some consoles/codes only send part of the RTD buffer (e.g. just the main
+# clock), which would otherwise leave these blank. Applied before
+# apply_sport_processing(), so derived fields follow ('Game' 1 -> '1st').
+_FIELD_DEFAULTS = {
+    'basketball': {
+        'MainClockTime':          '20:00',
+        'ShotClockTime':          '30',
+        'Game':                   '1',
+        'HomeTeamScore':          '0',
+        'AwayTeamScore':          '0',
+        'HomeTeamFouls':          '0',
+        'AwayTeamFouls':          '0',
+        'HomeTimeOutsLeft-Total': '6',
+        'AwayTimeOutsLeft-Total': '6',
+    },
+}
+
+
+def apply_field_defaults(data, dak, sport_name):
+    for key, value in _FIELD_DEFAULTS.get(sport_name, {}).items():
+        if not dak.was_received(key):
+            data[key] = value
+
+
 def build_score_dict(dak, sport_config):
     """Extract all fields from the RTD buffer into a flat dict."""
     data = {}
@@ -160,14 +185,81 @@ def _process_football(data):
     data['PlayClockTimeAlert'] = play_clock if under_10 else ''
 
 
+_ORDINALS = ('1st', '2nd', '3rd', '4th')
+
+
+def _period_text(period_str, regulation):
+    """Period number -> '1st'.. for regulation, then 'OT', 'OT2', 'OT3'...
+    regulation is 2 (college halves) or 4 (high school quarters)."""
+    s = period_str.strip()
+    try:
+        n = int(s)
+    except (ValueError, TypeError):
+        return s            # console sent text (or blank) — pass it through
+    if n <= 0:
+        return ''
+    if n <= regulation:
+        return _ORDINALS[n - 1]
+    ot = n - regulation
+    return 'OT' if ot == 1 else 'OT{}'.format(ot)
+
+
+def _process_basketball(data):
+    # 'Game' is the AllSport basketball period number (item 142)
+    regulation = 4 if settings.current.get('basketball_level') == 'highschool' else 2
+    data['GameHalfText'] = _period_text(data.get('Game', ''), regulation)
+
+
 _SPORT_PROCESSORS = {
-    'baseball': _process_baseball,
-    # 'basketball': _process_basketball,
+    'baseball':   _process_baseball,
+    'basketball': _process_basketball,
     'football':   _process_football,
 }
 
 
+# Secondary clocks (8-char field at 201) — at 0 the console fills the field
+# with a horn/expired marker alongside the time (e.g. "0 z"), which would
+# otherwise show on air and break PlayClockTimeAlert's int() parse.
+_SECONDARY_CLOCKS = ('ShotClockTime', 'PlayClockTime')
+
+
+def _clean_clock(value):
+    """Keep only the time characters: '0 z' -> '0', '0:24' -> '0:24'."""
+    return ''.join(c for c in value if c.isdigit() or c in ':.')
+
+
+# Every Daktronics clock field — tenths are only shown under 10 seconds
+_CLOCK_FIELDS = (
+    'MainClockTime', 'MainClockTimeAlt',
+    'MainClockTimeOutTOD', 'MainClockTimeOutTODAlt',
+    'ShotClockTime', 'PlayClockTime', 'TimeOutTime',
+)
+
+
+def _trim_tenths(value):
+    """Drop the fractional part unless under 10 s: '45.3' -> '45',
+    '1:05.3' -> '1:05', '9.8' -> '9.8'. Truncates (not rounds) so a
+    countdown reads 1:00 -> 59 ... 10 -> 9.9. Non-clock text is untouched."""
+    if '.' not in value:
+        return value
+    whole = value.split('.', 1)[0]
+    secs = 0
+    try:
+        for part in whole.split(':'):
+            secs = secs * 60 + (int(part) if part else 0)
+    except ValueError:
+        return value
+    return whole if secs >= 10 else value
+
+
 def apply_sport_processing(data, sport_name):
+    for key in _SECONDARY_CLOCKS:
+        if key in data:
+            data[key] = _clean_clock(data[key])
+    for key in _CLOCK_FIELDS:
+        if key in data:
+            data[key] = _trim_tenths(data[key])
+
     processor = _SPORT_PROCESSORS.get(sport_name)
     if processor:
         processor(data)
@@ -187,14 +279,18 @@ _STICKY_EXCLUDED = (
 )
 
 
-async def serial_reader_task(dak, sport_config, sport_name, mqtt_enabled=False):
+async def serial_reader_task(dak, sport_config, sport_name, mqtt_enabled=False,
+                             vmix_enabled=False):
     """Read RTD packets continuously, yield between bytes for HTTP responsiveness."""
     print('Serial reader started')
     _mqtt_enabled = mqtt_enabled
+    if vmix_enabled:
+        import vmix
     while True:
         try:
             await dak.update()
             new_data = build_score_dict(dak, sport_config)
+            apply_field_defaults(new_data, dak, sport_name)
             apply_sport_processing(new_data, sport_name)
 
             # Keep last known non-empty value for fields that report blank mid-packet
@@ -206,6 +302,11 @@ async def serial_reader_task(dak, sport_config, sport_name, mqtt_enabled=False):
             new_data['sport'] = sport_name
             new_data['console'] = 'daktronics'
             webserver.score_data.update(new_data)
+
+            # Wake vMix first — the clock is the latency-sensitive one.
+            # vmix.run() only sends the mapped fields that changed.
+            if vmix_enabled:
+                vmix.data_ready.set()
 
             # Signal MQTT publisher that fresh data is available
             if _mqtt_enabled:
@@ -226,13 +327,13 @@ async def colorado_reader_task(cw, mqtt_enabled=False, vmix_enabled=False):
             await cw.update()
             new_data = cw.to_dict()
             new_data['console'] = 'colorado'
-            clock_changed = new_data['Clock'] != webserver.score_data.get('Clock')
             webserver.score_data.update(new_data)
 
-            # Push the clock to vMix first — it's the latency-sensitive one
-            if vmix_enabled and clock_changed:
+            # Wake vMix first — the clock is the latency-sensitive one.
+            # vmix.run() only sends the mapped fields that changed.
+            if vmix_enabled:
                 import vmix
-                vmix.clock_ready.set()
+                vmix.data_ready.set()
 
             if mqtt_enabled:
                 import mqtt_publisher
@@ -248,13 +349,13 @@ async def colorado_reader_task(cw, mqtt_enabled=False, vmix_enabled=False):
 # =============================================================================
 async def main():
     # 1. Ethernet (reads network settings from settings.current)
-    init_ethernet()
+    webserver.nic = init_ethernet()
 
     mqtt_enabled = bool(settings.current.get('mqtt_enabled'))
     console_type = settings.current.get('console', 'daktronics')
-    # Always runs for Colorado — vmix.run() idles while disabled in settings,
-    # so turning it on in /settings doesn't need a reboot
-    vmix_enabled = console_type == 'colorado'
+    # Always runs — vmix.run() idles while disabled in settings, so turning
+    # it on in /settings doesn't need a reboot
+    vmix_enabled = True
 
     # 2. Initialise the selected console's serial parser
     if console_type == 'colorado':
@@ -292,11 +393,14 @@ async def main():
 
         # Seed score_data so the endpoint always returns valid JSON before first packet
         webserver.score_data = {key: '' for key in sport_config}
+        apply_field_defaults(webserver.score_data, dak, sport_name)
+        apply_sport_processing(webserver.score_data, sport_name)
         webserver.score_data['sport']       = sport_name
         webserver.score_data['console']     = 'daktronics'
         webserver.score_data['device_name'] = settings.device_name()
 
-        reader = serial_reader_task(dak, sport_config, sport_name, mqtt_enabled)
+        reader = serial_reader_task(dak, sport_config, sport_name, mqtt_enabled,
+                                    vmix_enabled)
 
     # 3. Run HTTP server and serial reader concurrently
     await webserver.start(port=settings.current.get('http_port', 80))
@@ -311,7 +415,7 @@ async def main():
         ))
         print('MQTT publisher task started')
 
-    # 5. Optionally push the Colorado clock straight to vMix
+    # 5. Push the clock straight to vMix (idles until enabled in /settings)
     if vmix_enabled:
         import vmix
         tasks.append(asyncio.create_task(vmix.run()))
