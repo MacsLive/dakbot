@@ -249,7 +249,7 @@ def _trim_tenths(value):
             secs = secs * 60 + (int(part) if part else 0)
     except ValueError:
         return value
-    return whole if secs >= 10 else value
+    return whole if secs >= 60 else value
 
 
 def apply_sport_processing(data, sport_name):
